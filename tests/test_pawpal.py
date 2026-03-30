@@ -453,3 +453,246 @@ class TestConflictDetection:
         t1 = Task("Untimed A", "other", 30)
         t2 = Task("Untimed B", "other", 30)
         assert s.detect_conflicts([t1, t2]) == []
+
+    def test_three_way_overlap_produces_three_warnings(self) -> None:
+        """Three mutually-overlapping tasks must produce C(3,2)=3 conflict warnings."""
+        owner = Owner(name="X", available_time_minutes=180)
+        s = Scheduler(owner=owner)
+        # All three tasks start at the same time — every pair overlaps
+        t1 = self._stamped("A", "10:00", 60)
+        t2 = self._stamped("B", "10:00", 60)
+        t3 = self._stamped("C", "10:00", 60)
+        warnings = s.detect_conflicts([t1, t2, t3])
+        assert len(warnings) == 3
+
+    def test_conflict_warning_contains_time_range(self) -> None:
+        """Conflict warning strings must include start and end times for both tasks."""
+        owner = Owner(name="X", available_time_minutes=120)
+        s = Scheduler(owner=owner)
+        t1 = self._stamped("Vet",    "09:00", 60)
+        t2 = self._stamped("Groom",  "09:30", 30)
+        warnings = s.detect_conflicts([t1, t2])
+        assert len(warnings) == 1
+        w = warnings[0]
+        assert "09:00" in w
+        assert "09:30" in w
+
+
+# ---------------------------------------------------------------------------
+# Edge-case tests
+# ---------------------------------------------------------------------------
+
+
+class TestEdgeCases:
+    """Boundary conditions and unusual inputs that should never crash the system."""
+
+    # --- Scheduler edge cases ---
+
+    def test_single_task_exactly_fills_budget(self) -> None:
+        """A task whose duration equals the budget exactly must be scheduled."""
+        owner = Owner(name="Sam", available_time_minutes=20)
+        pet   = Pet("Dog", "dog")
+        pet.add_task(Task("Exact fit", "walk", 20, priority="high"))
+        s = Scheduler(owner=owner)
+        plan = s.generate_plan(pet)
+        assert len(plan) == 1
+        assert s.get_total_duration() == 20
+
+    def test_all_tasks_exceed_budget_yields_empty_plan(self) -> None:
+        """When every task is longer than the budget, the plan must be empty."""
+        owner = Owner(name="Sam", available_time_minutes=5)
+        pet   = Pet("Dog", "dog")
+        pet.add_task(Task("Long walk",  "walk", 60, priority="high"))
+        pet.add_task(Task("Long groom", "grooming", 30, priority="medium"))
+        s = Scheduler(owner=owner)
+        plan = s.generate_plan(pet)
+        assert plan == []
+        assert len(s.get_skipped_tasks()) == 2
+
+    def test_owner_with_no_pets_yields_empty_full_plan(self) -> None:
+        """An owner with no pets must produce an empty full plan without raising."""
+        owner = Owner(name="Empty", available_time_minutes=60)
+        s = Scheduler(owner=owner)
+        plan = s.generate_full_plan()
+        assert plan == []
+
+    def test_pet_with_no_tasks_yields_empty_plan(self) -> None:
+        """A pet whose task list is empty must yield an empty plan."""
+        owner = Owner(name="Sam", available_time_minutes=60)
+        pet   = Pet("Empty", "cat")
+        owner.add_pet(pet)
+        s = Scheduler(owner=owner)
+        assert s.generate_plan(pet) == []
+
+    def test_all_recurring_tasks_already_done_yields_empty_plan(self) -> None:
+        """If every recurring task was already completed today, the plan must be empty."""
+        owner = Owner(name="Pat", available_time_minutes=60)
+        pet   = Pet("Dog", "dog")
+        t = Task("Walk", "walk", 20, frequency="daily")
+        t.mark_complete()   # next_due = tomorrow
+        pet.add_task(t)
+        owner.add_pet(pet)
+        s = Scheduler(owner=owner)
+        plan = s.generate_plan(pet)
+        assert plan == []
+
+    def test_zero_time_budget_uses_owner_time(self) -> None:
+        """Scheduler(time_budget_minutes=0) must inherit the owner's available time."""
+        owner = Owner(name="Sam", available_time_minutes=45)
+        s = Scheduler(owner=owner, time_budget_minutes=0)
+        assert s.time_budget_minutes == 45
+
+    def test_custom_start_time_reflected_in_first_task(self) -> None:
+        """schedule_start_time must be the start_time of the first scheduled task."""
+        owner = Owner(name="Sam", available_time_minutes=60)
+        pet   = Pet("Dog", "dog")
+        pet.add_task(Task("Walk", "walk", 20, priority="high"))
+        s = Scheduler(owner=owner, schedule_start_time="10:30")
+        s.generate_plan(pet)
+        assert s.scheduled_tasks[0].start_time == "10:30"
+
+    def test_plan_replaces_previous_plan_on_second_call(self) -> None:
+        """Calling generate_plan() twice must replace, not append to, scheduled_tasks."""
+        owner = Owner(name="Sam", available_time_minutes=60)
+        pet   = Pet("Dog", "dog")
+        pet.add_task(Task("Walk", "walk", 10, priority="high"))
+        s = Scheduler(owner=owner)
+        s.generate_plan(pet)
+        first_count = len(s.scheduled_tasks)
+        s.generate_plan(pet)   # call again
+        assert len(s.scheduled_tasks) == first_count   # same count, not doubled
+
+    # --- Task edge cases ---
+
+    def test_task_end_time_none_when_no_start_time(self) -> None:
+        """end_time() must return None when start_time has not been assigned."""
+        t = Task("Walk", "walk", 20)
+        assert t.end_time() is None
+
+    def test_task_end_time_correct(self) -> None:
+        """end_time() must add duration to start_time correctly."""
+        t = Task("Walk", "walk", 45)
+        t.start_time = "08:15"
+        assert t.end_time() == "09:00"
+
+    def test_reset_for_today_clears_start_time(self) -> None:
+        """reset_for_today() must clear start_time as well as is_completed."""
+        t = Task("Walk", "walk", 20)
+        t.start_time    = "08:00"
+        t.is_completed  = True
+        t.reset_for_today()
+        assert t.start_time is None
+        assert t.is_completed is False
+
+    def test_task_with_unknown_priority_rank_returns_zero(self) -> None:
+        """An unrecognised priority string must return rank 0 without raising."""
+        t = Task("Walk", "walk", 10)
+        t.priority = "urgent"   # type: ignore[assignment]  — simulate bad data
+        assert t.priority_rank() == 0
+
+    # --- Sorting edge cases ---
+
+    def test_sort_empty_list_returns_empty(self) -> None:
+        """sort_tasks_by_time([]) must return an empty list, not raise."""
+        assert sort_tasks_by_time([]) == []
+
+    def test_sort_single_item_returns_same(self) -> None:
+        """sort_tasks_by_time with one item must return a list with that one item."""
+        t = Task("Solo", "other", 10)
+        t.start_time = "09:00"
+        result = sort_tasks_by_time([t])
+        assert len(result) == 1
+        assert result[0].title == "Solo"
+
+    def test_sort_tasks_same_time_preserves_relative_order(self) -> None:
+        """Tasks with identical start_times must preserve their relative (stable) order."""
+        t1 = Task("First",  "other", 5); t1.start_time = "09:00"
+        t2 = Task("Second", "other", 5); t2.start_time = "09:00"
+        result = sort_tasks_by_time([t1, t2])
+        assert result[0].title == "First"
+        assert result[1].title == "Second"
+
+    # --- Filter edge cases ---
+
+    def test_filter_empty_list_returns_empty(self) -> None:
+        """filter_tasks([]) must return an empty list for any filter combination."""
+        assert filter_tasks([], status="pending", priority="high") == []
+
+    def test_filter_no_matches_returns_empty(self) -> None:
+        """A filter that matches nothing must return an empty list."""
+        tasks = [Task("Walk", "walk", 20, priority="high")]
+        result = filter_tasks(tasks, priority="low")
+        assert result == []
+
+    def test_filter_min_duration(self) -> None:
+        """filter_tasks with min_duration must exclude tasks shorter than the threshold."""
+        tasks = [
+            Task("Short", "other",  5),
+            Task("Medium", "other", 15),
+            Task("Long",  "other",  30),
+        ]
+        result = filter_tasks(tasks, min_duration=15)
+        assert all(t.duration_minutes >= 15 for t in result)
+        assert len(result) == 2
+
+    def test_filter_does_not_mutate_input(self) -> None:
+        """filter_tasks must not modify the original list."""
+        tasks = [Task("Walk", "walk", 20, priority="high")]
+        original_len = len(tasks)
+        filter_tasks(tasks, priority="low")
+        assert len(tasks) == original_len
+
+    # --- Owner edge cases ---
+
+    def test_owner_get_all_due_tasks_excludes_not_due(self) -> None:
+        """get_all_due_tasks() must skip recurring tasks not yet due today."""
+        owner = Owner(name="Sam", available_time_minutes=60)
+        pet   = Pet("Dog", "dog")
+        due_task     = Task("Feed",  "feed", 5)
+        not_due_task = Task("Walk",  "walk", 20, frequency="daily")
+        not_due_task.mark_complete()   # pushes next_due to tomorrow
+        pet.add_task(due_task)
+        pet.add_task(not_due_task)
+        owner.add_pet(pet)
+
+        due = owner.get_all_due_tasks()
+        assert due_task in due
+        assert not_due_task not in due
+
+    def test_two_pets_same_task_title_are_independent(self) -> None:
+        """Tasks with the same title on different pets must be independent objects."""
+        owner = Owner(name="Sam", available_time_minutes=60)
+        p1 = Pet("Dog", "dog"); p1.add_task(Task("Feed", "feed", 5))
+        p2 = Pet("Cat", "cat"); p2.add_task(Task("Feed", "feed", 5))
+        owner.add_pet(p1)
+        owner.add_pet(p2)
+
+        dog_task = p1.get_tasks()[0]
+        cat_task = p2.get_tasks()[0]
+        dog_task.mark_complete()
+
+        assert dog_task.is_completed is True
+        assert cat_task.is_completed is False   # must not be affected
+
+    # --- Recurring task edge cases ---
+
+    def test_recurring_task_due_exactly_today(self) -> None:
+        """A recurring task with next_due == today must be considered due."""
+        t = Task("Walk", "walk", 20, frequency="daily")
+        t.next_due = date.today()
+        assert t.is_due_today() is True
+
+    def test_recurring_task_due_tomorrow_is_not_due(self) -> None:
+        """A recurring task with next_due == tomorrow must NOT be due today."""
+        t = Task("Walk", "walk", 20, frequency="daily")
+        t.next_due = date.today() + timedelta(days=1)
+        assert t.is_due_today() is False
+
+    def test_mark_complete_twice_keeps_later_next_due(self) -> None:
+        """Calling mark_complete() twice on a daily task must set next_due to tomorrow
+        both times (idempotent relative to today's date)."""
+        t = Task("Walk", "walk", 20, frequency="daily")
+        t.mark_complete()
+        first_due = t.next_due
+        t.mark_complete()
+        assert t.next_due == first_due   # same date both times

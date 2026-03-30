@@ -68,3 +68,45 @@ filter_tasks(all_tasks, status="pending", priority="high", max_duration=10)
 
 ### Conflict detection
 `Scheduler.detect_conflicts(tasks)` checks a list of time-stamped tasks for overlapping `[start, end)` windows and returns human-readable warning strings. The greedy scheduler never produces conflicts by construction (tasks are placed sequentially), but conflict detection is useful when tasks carry pre-assigned times from an external source.
+
+## Testing PawPal+
+
+### Running the tests
+
+```bash
+python -m pytest              # run all 72 tests
+python -m pytest -v           # verbose: show each test name and result
+python -m pytest -k "edge"    # run only the TestEdgeCases group
+```
+
+### What the tests cover
+
+The suite in `tests/test_pawpal.py` is organised into six test classes:
+
+| Class | Tests | What it verifies |
+|---|---|---|
+| `TestTask` | 5 | `mark_complete()`, priority ranking, serialisation |
+| `TestPet` | 7 | Add/remove tasks, priority ordering, completion tracking, daily reset |
+| `TestOwner` | 4 | Add/remove pets, name lookup, cross-pet task aggregation |
+| `TestScheduler` | 10 | Budget enforcement, priority ordering, start-time assignment, plan idempotency |
+| `TestSortTasksByTime` | 3 | Chronological ordering, unscheduled tasks sort last, no mutation |
+| `TestFilterTasks` | 7 | Status, category, priority, duration, combined filters, empty input |
+| `TestRecurringTasks` | 6 | daily/weekly `next_due` advancement, `is_due_today()`, scheduler exclusion |
+| `TestConflictDetection` | 6 | Single conflict, three-way conflict, adjacent tasks (no conflict), warning content |
+| `TestEdgeCases` | 24 | Zero budget, exact-fit boundary, empty pets/owners, bad data, stable sort, `reset_for_today`, independent same-name tasks across pets |
+
+### Key edge cases tested
+
+- **Exact budget fit** — a task that fills the budget to the minute is scheduled, not skipped.
+- **All tasks exceed budget** — the plan is empty and all tasks appear in the skipped list.
+- **All recurring tasks already done** — when every task's `next_due` is in the future, the plan is empty without raising.
+- **Calling `generate_plan()` twice** — the second call replaces, not appends to, `scheduled_tasks`.
+- **Two pets with the same task title** — completing one pet's task must not affect the other's.
+- **Unknown priority string** — `priority_rank()` returns 0 safely rather than raising `KeyError`.
+- **Three mutually-overlapping tasks** — `detect_conflicts()` reports all C(3,2) = 3 pairs.
+
+### Confidence level
+
+**★★★★☆ (4/5)**
+
+The core scheduling behaviours — priority ordering, time-budget enforcement, recurrence, and conflict detection — are thoroughly covered. The primary gap is integration testing: the Streamlit UI layer (`app.py`) is not tested, and there are no tests for multi-day sequences of recurring tasks (e.g., verify that a daily task resurfaces correctly after a simulated day-roll). Those would be the next tests to add.
