@@ -41,3 +41,30 @@ pip install -r requirements.txt
 5. Add tests to verify key behaviors.
 6. Connect your logic to the Streamlit UI in `app.py`.
 7. Refine UML so it matches what you actually built.
+
+## Smarter Scheduling
+
+Phase 4 adds four algorithmic improvements to `pawpal_system.py`:
+
+### Sorting by time
+`sort_tasks_by_time(tasks)` returns tasks ordered by their assigned `HH:MM` start slot.
+Because start times are zero-padded strings, lexicographic order equals chronological order — no `datetime` parsing required. The `Scheduler` exposes this as `scheduler.sort_tasks_by_time()` for convenience.
+
+### Filtering
+`filter_tasks(tasks, *, status, category, priority, min_duration, max_duration, frequency)` returns a filtered subset of any task list. All arguments are keyword-only and ANDed together, so you can combine them freely:
+
+```python
+# pending high-priority tasks under 10 minutes
+filter_tasks(all_tasks, status="pending", priority="high", max_duration=10)
+```
+
+### Recurring tasks
+`Task` now has a `frequency` field (`"none"` / `"daily"` / `"weekly"`). Calling `mark_complete()` on a recurring task automatically sets `next_due` using `timedelta`:
+
+- daily → `next_due = today + 1 day`
+- weekly → `next_due = today + 7 days`
+
+`Task.is_due_today()` returns `False` until `next_due` arrives, and the `Scheduler` respects this — completed recurring tasks are automatically excluded from the next plan run.
+
+### Conflict detection
+`Scheduler.detect_conflicts(tasks)` checks a list of time-stamped tasks for overlapping `[start, end)` windows and returns human-readable warning strings. The greedy scheduler never produces conflicts by construction (tasks are placed sequentially), but conflict detection is useful when tasks carry pre-assigned times from an external source.

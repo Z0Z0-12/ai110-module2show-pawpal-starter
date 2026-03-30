@@ -3,8 +3,10 @@ PawPal+ — Unit Tests
 Run with:  python -m pytest
 """
 
+from datetime import date, timedelta
+
 import pytest
-from pawpal_system import Owner, Pet, Scheduler, Task
+from pawpal_system import Owner, Pet, Scheduler, Task, filter_tasks, sort_tasks_by_time
 
 
 # ---------------------------------------------------------------------------
@@ -58,9 +60,12 @@ class TestTask:
         assert high.priority_rank() > medium.priority_rank() > low.priority_rank()
 
     def test_to_dict_keys(self, sample_task: Task) -> None:
-        """to_dict() must contain all expected keys."""
+        """to_dict() must contain all expected keys (including Phase 4 additions)."""
         d = sample_task.to_dict()
-        assert set(d.keys()) == {"title", "category", "duration_minutes", "priority", "is_completed"}
+        assert set(d.keys()) == {
+            "title", "category", "duration_minutes", "priority", "is_completed",
+            "frequency", "start_time", "end_time",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -244,3 +249,207 @@ class TestScheduler:
         s = Scheduler(owner=owner)
         msg = s.explain_plan()
         assert "No plan generated" in msg
+
+    def test_scheduled_tasks_have_start_times(self) -> None:
+        """Every task in the generated plan must have a non-None start_time."""
+        scheduler, pet = self._make_scheduler(budget=60)
+        pet.add_task(Task("Walk", "walk", 10, priority="high"))
+        pet.add_task(Task("Feed", "feed", 5,  priority="medium"))
+        scheduler.generate_plan(pet)
+        for task in scheduler.scheduled_tasks:
+            assert task.start_time is not None
+
+    def test_start_times_are_sequential(self) -> None:
+        """Tasks must be assigned non-decreasing start times."""
+        scheduler, pet = self._make_scheduler(budget=60)
+        pet.add_task(Task("A", "walk", 10, priority="high"))
+        pet.add_task(Task("B", "feed", 10, priority="high"))
+        pet.add_task(Task("C", "meds", 10, priority="high"))
+        scheduler.generate_plan(pet)
+        times = [task.start_time for task in scheduler.scheduled_tasks]
+        assert times == sorted(times)
+
+
+# ---------------------------------------------------------------------------
+# Sorting tests
+# ---------------------------------------------------------------------------
+
+
+class TestSortTasksByTime:
+    def test_sorts_chronologically(self) -> None:
+        """sort_tasks_by_time() must return tasks in HH:MM ascending order."""
+        t1 = Task("Noon",    "other", 10); t1.start_time = "12:00"
+        t2 = Task("Morning", "other", 10); t2.start_time = "08:30"
+        t3 = Task("Eve",     "other", 10); t3.start_time = "17:00"
+        result = sort_tasks_by_time([t1, t2, t3])
+        assert [t.start_time for t in result] == ["08:30", "12:00", "17:00"]
+
+    def test_unscheduled_tasks_go_last(self) -> None:
+        """Tasks without a start_time must be placed after all timed tasks."""
+        timed   = Task("Timed",   "other", 5); timed.start_time = "09:00"
+        untimed = Task("Untimed", "other", 5)
+        result = sort_tasks_by_time([untimed, timed])
+        assert result[0].title == "Timed"
+        assert result[-1].title == "Untimed"
+
+    def test_returns_new_list(self) -> None:
+        """sort_tasks_by_time() must not mutate the original list."""
+        tasks = [Task("A", "other", 5), Task("B", "other", 5)]
+        tasks[0].start_time = "10:00"
+        tasks[1].start_time = "08:00"
+        original_order = [t.title for t in tasks]
+        sort_tasks_by_time(tasks)
+        assert [t.title for t in tasks] == original_order
+
+
+# ---------------------------------------------------------------------------
+# Filter tests
+# ---------------------------------------------------------------------------
+
+
+class TestFilterTasks:
+    def _sample_tasks(self) -> list[Task]:
+        t1 = Task("Walk",  "walk",      25, priority="high")
+        t2 = Task("Feed",  "feed",       5, priority="high")
+        t3 = Task("Brush", "grooming",  15, priority="low")
+        t4 = Task("Play",  "enrichment", 10, priority="medium")
+        t2.mark_complete()
+        return [t1, t2, t3, t4]
+
+    def test_filter_pending(self) -> None:
+        tasks = self._sample_tasks()
+        result = filter_tasks(tasks, status="pending")
+        assert all(not t.is_completed for t in result)
+        assert len(result) == 3
+
+    def test_filter_completed(self) -> None:
+        tasks = self._sample_tasks()
+        result = filter_tasks(tasks, status="completed")
+        assert all(t.is_completed for t in result)
+        assert len(result) == 1
+
+    def test_filter_by_category(self) -> None:
+        tasks = self._sample_tasks()
+        result = filter_tasks(tasks, category="walk")
+        assert all(t.category == "walk" for t in result)
+
+    def test_filter_by_priority(self) -> None:
+        tasks = self._sample_tasks()
+        result = filter_tasks(tasks, priority="high")
+        assert all(t.priority == "high" for t in result)
+        assert len(result) == 2
+
+    def test_filter_by_max_duration(self) -> None:
+        tasks = self._sample_tasks()
+        result = filter_tasks(tasks, max_duration=10)
+        assert all(t.duration_minutes <= 10 for t in result)
+
+    def test_combined_filters(self) -> None:
+        tasks = self._sample_tasks()
+        result = filter_tasks(tasks, status="pending", priority="high")
+        assert len(result) == 1
+        assert result[0].title == "Walk"
+
+    def test_no_filter_returns_all(self) -> None:
+        tasks = self._sample_tasks()
+        assert len(filter_tasks(tasks)) == len(tasks)
+
+
+# ---------------------------------------------------------------------------
+# Recurring task tests
+# ---------------------------------------------------------------------------
+
+
+class TestRecurringTasks:
+    def test_daily_task_advances_next_due_by_one_day(self) -> None:
+        """mark_complete() on a daily task must set next_due to tomorrow."""
+        task = Task("Walk", "walk", 20, frequency="daily")
+        task.mark_complete()
+        assert task.next_due == date.today() + timedelta(days=1)
+
+    def test_weekly_task_advances_next_due_by_seven_days(self) -> None:
+        """mark_complete() on a weekly task must set next_due to today + 7."""
+        task = Task("Flea meds", "meds", 5, frequency="weekly")
+        task.mark_complete()
+        assert task.next_due == date.today() + timedelta(days=7)
+
+    def test_non_recurring_task_has_no_next_due(self) -> None:
+        """mark_complete() on a one-off task must not set next_due."""
+        task = Task("One-off", "other", 10, frequency="none")
+        task.mark_complete()
+        assert task.next_due is None
+
+    def test_completed_recurring_task_not_due_today(self) -> None:
+        """A recurring task marked complete today must report is_due_today() = False."""
+        task = Task("Daily walk", "walk", 20, frequency="daily")
+        task.mark_complete()
+        assert task.is_due_today() is False
+
+    def test_overdue_recurring_task_is_due_today(self) -> None:
+        """A recurring task with next_due in the past must report is_due_today() = True."""
+        task = Task("Old task", "other", 5, frequency="daily")
+        task.next_due = date.today() - timedelta(days=1)
+        assert task.is_due_today() is True
+
+    def test_scheduler_skips_tasks_not_due(self) -> None:
+        """Scheduler must exclude recurring tasks whose next_due is in the future."""
+        owner = Owner(name="Pat", available_time_minutes=60)
+        pet   = Pet("Dog", "dog")
+        task  = Task("Walk", "walk", 20, frequency="daily")
+        task.mark_complete()   # next_due = tomorrow — not due today
+        pet.add_task(task)
+        owner.add_pet(pet)
+
+        s = Scheduler(owner=owner)
+        plan = s.generate_plan(pet)
+        assert task not in plan
+
+
+# ---------------------------------------------------------------------------
+# Conflict detection tests
+# ---------------------------------------------------------------------------
+
+
+class TestConflictDetection:
+    def _stamped(self, title: str, start: str, duration: int) -> Task:
+        t = Task(title, "other", duration)
+        t.start_time = start
+        return t
+
+    def test_overlapping_tasks_produce_warning(self) -> None:
+        """Two tasks whose windows overlap must produce at least one conflict warning."""
+        owner = Owner(name="X", available_time_minutes=120)
+        s = Scheduler(owner=owner)
+        t1 = self._stamped("A", "09:00", 60)   # 09:00–10:00
+        t2 = self._stamped("B", "09:30", 30)   # 09:30–10:00 — overlaps A
+        warnings = s.detect_conflicts([t1, t2])
+        assert len(warnings) == 1
+        assert "A" in warnings[0] and "B" in warnings[0]
+
+    def test_non_overlapping_tasks_have_no_warnings(self) -> None:
+        """Tasks whose windows do not overlap must produce zero warnings."""
+        owner = Owner(name="X", available_time_minutes=120)
+        s = Scheduler(owner=owner)
+        t1 = self._stamped("A", "09:00", 30)   # 09:00–09:30
+        t2 = self._stamped("B", "09:30", 30)   # 09:30–10:00 — adjacent, not overlapping
+        assert s.detect_conflicts([t1, t2]) == []
+
+    def test_greedy_plan_is_conflict_free(self) -> None:
+        """The scheduler's own generated plan must never contain conflicts."""
+        owner = Owner(name="Y", available_time_minutes=60)
+        pet   = Pet("Dog", "dog")
+        pet.add_task(Task("Walk", "walk", 20, priority="high"))
+        pet.add_task(Task("Feed", "feed", 10, priority="medium"))
+        owner.add_pet(pet)
+
+        s = Scheduler(owner=owner)
+        s.generate_plan(pet)
+        assert s.detect_conflicts() == []
+
+    def test_tasks_without_start_time_ignored(self) -> None:
+        """Tasks with no start_time assigned must be ignored by conflict detection."""
+        owner = Owner(name="Z", available_time_minutes=60)
+        s = Scheduler(owner=owner)
+        t1 = Task("Untimed A", "other", 30)
+        t2 = Task("Untimed B", "other", 30)
+        assert s.detect_conflicts([t1, t2]) == []

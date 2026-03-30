@@ -87,13 +87,19 @@ A second small change: `Task` was initially a plain class. Switching to a Python
 
 **a. Constraints and priorities**
 
-- What constraints does your scheduler consider (for example: time, priority, preferences)?
-- How did you decide which constraints mattered most?
+The scheduler considers three constraints in order of importance:
+
+1. **Recurrence / due date** — tasks that are not due today (because a recurring task was already completed and its `next_due` is in the future) are filtered out entirely before scheduling begins. This is the hardest constraint: no budget can override it.
+2. **Time budget** — the owner's `available_time_minutes` caps the total duration of the day's plan. Tasks that would exceed the remaining time are skipped and recorded.
+3. **Priority** — within the time budget, tasks are sorted high → medium → low so the most important care always fits first. Priority was chosen as the primary scheduling key (over, say, duration) because pet health tasks like medication or feeding should always be attempted before enrichment activities regardless of how long they take.
 
 **b. Tradeoffs**
 
-- Describe one tradeoff your scheduler makes.
-- Why is that tradeoff reasonable for this scenario?
+**Tradeoff: greedy priority-first vs. optimal packing.**
+
+The scheduler uses a greedy algorithm: it works through tasks in priority order and takes each one as long as it fits. This can leave wasted time. For example, if the budget is 10 minutes, a high-priority 9-minute task is taken, and then a low-priority 1-minute task cannot fit after a 10-minute medium-priority task that would have used the budget perfectly — but the greedy algorithm already committed to the high-priority task.
+
+A knapsack-style optimal algorithm could pack the budget more tightly, but it is O(n × budget) in time and space versus O(n log n) for the greedy sort. For a pet owner with at most ~10–20 tasks per day, this is not a performance concern — but the greedy approach is far easier to explain, debug, and extend, which matters more in a prototype tool used by a single owner. The correctness guarantee we do provide (every high-priority task is attempted before any lower-priority task) is the one that matters most for pet health.
 
 ---
 
